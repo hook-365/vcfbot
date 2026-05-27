@@ -13,10 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/vcfbot ./vcfbot
 ENV PYTHONPATH=/app
 
-# Drop privileges. uid 1000 matches the typical host user (anthony on
-# apollo), so anything chromadb writes to the bind-mounted ./data/ ends
-# up host-owned, not root-owned. Avoids the "rsync into chroma fails
-# with Permission denied" trap entirely.
+# Drop privileges. uid 1000 matches the typical first-user uid on most
+# Linux distros, so anything chromadb writes to the bind-mounted ./data/
+# ends up host-user-owned, not root-owned. On a host whose primary user
+# has a different uid, change the values below or override at runtime
+# via compose `user:`.
 RUN groupadd -g 1000 vcfbot \
  && useradd -u 1000 -g 1000 -m -s /usr/sbin/nologin vcfbot \
  && chown -R vcfbot:vcfbot /app

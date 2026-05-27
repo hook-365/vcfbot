@@ -382,6 +382,7 @@ html[data-theme="light"] .theme-toggle__icon--light { display: block; }
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
+  text-decoration: none;
   transition: color var(--tx-fast), background-color var(--tx-fast), border-color var(--tx-fast), opacity var(--tx-fast);
 }
 .header-btn:hover:not(:disabled) {
@@ -1481,6 +1482,7 @@ html[data-theme="light"] .theme-toggle__icon--light { display: block; }
 .about__foot {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   padding-top: var(--space-sm);
   border-top: 1px dashed var(--rule);
   font-family: var(--font-mono);
@@ -1489,6 +1491,16 @@ html[data-theme="light"] .theme-toggle__icon--light { display: block; }
   text-transform: uppercase;
   color: var(--ink-4);
 }
+.about__repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  text-decoration: none;
+  transition: color var(--tx-fast);
+}
+.about__repo:hover { color: var(--accent); }
+.about__repo svg { flex: none; }
 
 @media (max-width: 640px) {
   .about__panel { padding: var(--space-lg) var(--space-md); }

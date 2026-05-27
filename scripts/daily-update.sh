@@ -7,7 +7,7 @@
 # appended per actual update so the web UI can show recent changes.
 #
 # Idempotent. Safe to run on demand:
-#   sudo /home/anthony/dev/vcfbot/scripts/daily-update.sh
+#   bash scripts/daily-update.sh
 #
 set -uo pipefail
 
