@@ -1,0 +1,36 @@
+# Python build artifacts
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local config and runtime data (never commit)
+.env
+.env.local
+data/
+# docker-compose merges this on top of docker-compose.yml automatically;
+# use it for deployment-specific labels, ports, network mounts, etc.
+docker-compose.override.yml
+
+# Editor / OS metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Tooling state
+.claude/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log

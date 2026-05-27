@@ -1,0 +1,48 @@
+services:
+  vcfbot:
+    build: .
+    image: vcfbot:latest
+    container_name: vcfbot
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # Loopback-only by default — exposure happens through a reverse proxy
+      # (NPMplus, Caddy, Traefik, ...). Change to 0.0.0.0:8129:8129 to expose
+      # on the LAN, but there's no app-level auth, so gate it elsewhere.
+      - "127.0.0.1:8129:8129"
+    environment:
+      # OpenAI-compatible endpoints. Defaults below assume something is
+      # listening on the host's loopback (e.g. LM Studio at :1234, llama.cpp
+      # at custom ports). Override via .env or shell environment.
+      CHAT_BASE_URL:  ${CHAT_BASE_URL:-http://host.docker.internal:1234/v1}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://host.docker.internal:1234/v1}
+      CHAT_MODEL:     ${CHAT_MODEL:-local-model}
+      EMBED_MODEL:    ${EMBED_MODEL:-nomic-embed-text-v1.5}
+      TOP_K:          ${TOP_K:-4}
+      # nomic-embed-text-v1.5 has n_ctx_train=2048. Dense technical text
+      # often tokenizes ~6× heavier in BERT WordPiece than cl100k (lots of
+      # dashed acronyms), so we cap chunks at 220 cl100k tokens to stay
+      # safely under the 2048 nomic ceiling. Raise this only if you switch
+      # to an embed model with a larger trained context.
+      TARGET_TOKENS:  ${TARGET_TOKENS:-220}
+      OVERLAP_TOKENS: ${OVERLAP_TOKENS:-40}
+      # Container-internal paths; data/ on the host is bind-mounted below.
+      PDF_DIR:        /app/data/pdfs
+      CHROMA_DIR:     /app/data/chroma
+    extra_hosts:
+      # Lets the container reach services running on the host's loopback
+      # via host.docker.internal:<port>. Linux equivalent of the Mac/Win
+      # default — required because Linux doesn't resolve this name out of
+      # the box.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # PDFs and chromadb store. Container runs as uid 1000 so files end
+      # up host-user-owned on a typical single-user box.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8129/api/status >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
