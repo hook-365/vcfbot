@@ -565,10 +565,14 @@ async function loadChangelog() {
         const sign = delta === 0 ? '±0' : (delta > 0 ? `+${delta}` : `${delta}`);
         detail = `${sign}, ${dur}`;
       }
+      const sectionsHtml = renderDiffSections(e.diff_sections);
       return `<li>
-        <span class="upd__when" title="${escapeAttr(e.ts)}">${when}</span>
-        <span class="upd__src">${escapeAttr(e.source)}</span>
-        <span class="upd__delta">${e.chunks_after.toLocaleString()} chunks <span style="color:var(--ink-4)">(${detail})</span></span>
+        <div class="upd__row">
+          <span class="upd__when" title="${escapeAttr(e.ts)}">${when}</span>
+          <span class="upd__src">${escapeAttr(e.source)}</span>
+          <span class="upd__delta">${e.chunks_after.toLocaleString()} chunks <span style="color:var(--ink-4)">(${detail})</span></span>
+        </div>
+        ${sectionsHtml}
       </li>`;
     }).join('');
     els.clogMeta.textContent = `${entries.length} update${entries.length === 1 ? '' : 's'} · last check daily @ 04:00`;
@@ -576,6 +580,36 @@ async function loadChangelog() {
     els.clogList.innerHTML = `<li class="about__updates-empty">Couldn't load changelog: ${escapeAttr(err.message || String(err))}</li>`;
     els.clogMeta.textContent = 'error';
   }
+}
+
+function renderDiffSections(sections) {
+  if (!sections || !sections.length) return '';
+  const SHOW = 10;
+  const visible = sections.slice(0, SHOW);
+  const overflow = sections.length - visible.length;
+  const rows = visible.map(s => {
+    const a = s.added || 0;
+    const r = s.removed || 0;
+    const parts = [];
+    if (a > 0) parts.push(`<span class="upd__sec-add">+${a}</span>`);
+    if (r > 0) parts.push(`<span class="upd__sec-rem">−${r}</span>`);
+    const counts = parts.join(' ');
+    const pages = (s.pages && s.pages.length === 2)
+      ? (s.pages[0] === s.pages[1] ? `p.${s.pages[0]}` : `pp.${s.pages[0]}–${s.pages[1]}`)
+      : '';
+    return `<li>
+      <span class="upd__sec-counts">${counts}</span>
+      <span class="upd__sec-name">${escapeAttr(s.section || '(unsectioned)')}</span>
+      <span class="upd__sec-pages">${pages}</span>
+    </li>`;
+  }).join('');
+  const more = overflow > 0
+    ? `<li class="upd__sec-more">…and ${overflow} more section${overflow === 1 ? '' : 's'}</li>`
+    : '';
+  return `<details class="upd__sections">
+    <summary>${sections.length} section${sections.length === 1 ? '' : 's'} changed</summary>
+    <ul>${rows}${more}</ul>
+  </details>`;
 }
 
 function relativeTime(iso) {

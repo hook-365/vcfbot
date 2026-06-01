@@ -106,6 +106,7 @@ def create_app() -> FastAPI:
                 hits: list[dict] = []
                 context_blocks: list[str] = []
                 for doc, meta, dist in zip(docs, metas, dists):
+                    meta = meta or {}  # chroma can hand back None metadata; never let .get crash a query
                     page_start = int(meta.get("page_start", 0))
                     page_end   = int(meta.get("page_end", page_start))
                     source     = meta.get("source", "?")

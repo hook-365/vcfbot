@@ -27,6 +27,10 @@ class ChangelogEntry:
     # written before this field landed will leave these as None.
     chunks_added: int | None = None      # chunks newly embedded
     chunks_removed: int | None = None    # orphan chunks deleted
+    # Per-section breakdown (added 2026-05-28). Each row:
+    #   {"section": str, "added": int, "removed": int, "pages": [lo, hi]}
+    # Sorted by total impact desc. None on entries written before this field.
+    diff_sections: list[dict] | None = None
 
 
 def now_iso() -> str:

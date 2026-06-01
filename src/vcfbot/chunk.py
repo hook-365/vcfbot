@@ -31,9 +31,14 @@ def _split_paragraphs(text: str) -> list[str]:
     return [p.strip() for p in text.split("\n\n") if p.strip()]
 
 
-def _make_id(source: str, page_start: int, page_end: int, text: str) -> str:
-    h = hashlib.sha1(f"{source}|{page_start}|{page_end}|{text}".encode()).hexdigest()
-    return f"{source}-{page_start:04d}-{h[:10]}"
+def _make_id(source: str, text: str) -> str:
+    # Hash only (source, text) — NOT page numbers. Upstream PDFs occasionally
+    # get re-paginated without content changes (TOC insertions, layout reflow);
+    # including pages in the hash would invalidate thousands of unchanged
+    # chunks on every such release and force a re-embed cascade. Pages live
+    # in metadata and are refreshed in-place by `index_pdf_incremental`.
+    h = hashlib.sha1(f"{source}|{text}".encode()).hexdigest()
+    return f"{source}-{h[:14]}"
 
 
 def chunk_pages(
@@ -63,7 +68,7 @@ def chunk_pages(
             return
         chunks.append(
             Chunk(
-                id=_make_id(source, buf_page_start, buf_page_end, text),
+                id=_make_id(source, text),
                 source=source,
                 text=text,
                 page_start=buf_page_start,

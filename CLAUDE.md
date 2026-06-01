@@ -137,10 +137,18 @@ bash scripts/daily-update.sh                      # on-demand refresh
    different vector space. Use `vcfbot update --force` (which calls
    `reset_collection` then re-embeds) — do NOT rmtree.
 
-8. **Chunk IDs are deterministic** from `(source, page_start, page_end,
-   text)`. Re-running `vcfbot index` is idempotent. If only metadata
-   needs updating (a fixed section detector, a new field), prefer
-   `collection.update(ids=..., metadatas=...)` over a full re-embed.
+8. **Chunk IDs are text-stable** — `_make_id` in `chunk.py` hashes only
+   `(source, text)`, *not* page numbers. This is deliberate: Broadcom
+   occasionally re-paginates the master PDF without changing content
+   (TOC insertions, layout reflow), and including pages in the hash
+   would cascade-invalidate thousands of unchanged chunks. Pages live
+   in metadata; `index_pdf_incremental` refreshes them in-place via
+   `collection.update(metadatas=...)` for chunks whose text matched.
+   Re-running `vcfbot index` is idempotent. Changing chunking
+   parameters (e.g. `TARGET_TOKENS`) still produces different text
+   slices → different hashes → still invalidates everything (a forced
+   rebuild is the only path). Changing the hash function itself
+   (this file) is a one-time migration: deploy + `update --force` once.
 
 9. **Section detection uses the PDF outline, not font sizes.** DITA-OT
    PDFs (which Broadcom uses) flatten visual hierarchy at render time, so

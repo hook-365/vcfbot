@@ -19,7 +19,7 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL:-http://host.docker.internal:1234/v1}
       CHAT_MODEL:     ${CHAT_MODEL:-local-model}
       EMBED_MODEL:    ${EMBED_MODEL:-nomic-embed-text-v1.5}
-      TOP_K:          ${TOP_K:-4}
+      TOP_K:          ${TOP_K:-6}
       # nomic-embed-text-v1.5 has n_ctx_train=2048. Dense technical text
       # often tokenizes ~6× heavier in BERT WordPiece than cl100k (lots of
       # dashed acronyms), so we cap chunks at 220 cl100k tokens to stay

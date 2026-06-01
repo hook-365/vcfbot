@@ -258,13 +258,35 @@ def index_pdf_incremental(
 
     to_embed: list[Chunk] = [c for c in chunks if c.id not in existing_ids]
     orphan_ids: list[str] = list(existing_ids - new_ids)
-    unchanged = len(chunks) - len(to_embed)
+    to_refresh: list[Chunk] = [c for c in chunks if c.id in existing_ids]
+    unchanged = len(to_refresh)
 
     log(
-        f"diff: {unchanged} unchanged, "
+        f"diff: {unchanged} unchanged-text, "
         f"{len(to_embed)} new, "
         f"{len(orphan_ids)} orphan"
     )
+
+    # Chunks whose text is unchanged but may have moved to a different page in
+    # the new PDF. Push fresh page_start/page_end/section metadata in-place —
+    # no embed call needed. Batched to avoid handing chroma a 30k-row update.
+    if to_refresh:
+        refresh_batch = 500
+        for i in range(0, len(to_refresh), refresh_batch):
+            group = to_refresh[i : i + refresh_batch]
+            collection.update(
+                ids=[c.id for c in group],
+                metadatas=[
+                    {
+                        "source": c.source,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
+                        "section": c.section or "",
+                    }
+                    for c in group
+                ],
+            )
+        log(f"refreshed metadata on {len(to_refresh)} chunks")
 
     if to_embed:
         client = _client(settings)
@@ -290,16 +312,64 @@ def index_pdf_incremental(
             done += len(group)
             log(f"embedded {done}/{len(to_embed)} new chunks")
 
+    # Pull orphan metadata BEFORE deletion so we can summarize what was
+    # removed (section path + page range). include=["metadatas"] only —
+    # documents and embeddings would balloon memory on full transitions.
+    orphan_meta: list[dict] = []
     if orphan_ids:
+        got = collection.get(ids=orphan_ids, include=["metadatas"])
+        orphan_meta = list(got.get("metadatas") or [])
         log(f"deleting {len(orphan_ids)} orphan chunks")
         collection.delete(ids=orphan_ids)
+
+    diff_sections = _summarize_diff(to_embed, orphan_meta)
 
     return {
         "total": len(chunks),
         "added": len(to_embed),
         "removed": len(orphan_ids),
         "unchanged": unchanged,
+        "diff_sections": diff_sections,
     }
+
+
+def _summarize_diff(
+    added: list[Chunk],
+    removed_meta: list[dict],
+) -> list[dict]:
+    """Group added + removed chunks by section. One row per section with
+    counts and the union page range. Sorted by total impact desc, then
+    section name. Output is JSON-serializable for the changelog.
+    """
+    # section -> {"added": n, "removed": n, "pages": [lo, hi]}
+    bucket: dict[str, dict] = {}
+
+    def touch(section: str, page_start: int, page_end: int, key: str) -> None:
+        section = section or "(unsectioned)"
+        slot = bucket.setdefault(
+            section, {"added": 0, "removed": 0, "pages": None}
+        )
+        slot[key] += 1
+        pg = slot["pages"]
+        lo = page_start if pg is None else min(pg[0], page_start)
+        hi = page_end if pg is None else max(pg[1], page_end)
+        slot["pages"] = [lo, hi]
+
+    for c in added:
+        touch(c.section or "", c.page_start, c.page_end, "added")
+    for m in removed_meta:
+        touch(
+            str(m.get("section") or ""),
+            int(m.get("page_start") or 0),
+            int(m.get("page_end") or 0),
+            "removed",
+        )
+
+    rows = [
+        {"section": sec, **vals} for sec, vals in bucket.items()
+    ]
+    rows.sort(key=lambda r: (-(r["added"] + r["removed"]), r["section"]))
+    return rows
 
 
 def reset_collection(settings: Settings | None = None) -> None:

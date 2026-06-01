@@ -134,6 +134,10 @@ def update(force: bool) -> None:
 
     total_added = 0
     total_removed = 0
+    # Per-source diff_sections keyed by pdf.stem; written into each
+    # ChangelogEntry below. Diff section detail is only available from
+    # the incremental path — `--force` rebuilds skip it.
+    diff_by_source: dict[str, list[dict]] = {}
 
     if force:
         # Hard rebuild — chromadb API reset (NOT rmtree; that breaks open
@@ -153,6 +157,7 @@ def update(force: bool) -> None:
             )
             total_added += stats["added"]
             total_removed += stats["removed"]
+            diff_by_source[pdf.stem] = stats.get("diff_sections") or []
 
     duration = time.time() - started
     chunks_after = collection_count(settings)
@@ -173,6 +178,7 @@ def update(force: bool) -> None:
                 duration_sec=round(duration, 1),
                 chunks_added=total_added,
                 chunks_removed=total_removed,
+                diff_sections=diff_by_source.get(r.name) or None,
             ),
         )
     console.print(

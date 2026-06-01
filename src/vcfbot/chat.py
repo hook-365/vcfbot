@@ -42,6 +42,7 @@ def _retrieve(question: str, settings: Settings) -> list[Retrieved]:
     metas = res.get("metadatas", [[]])[0]
     dists = res.get("distances", [[]])[0]
     for doc, meta, dist in zip(docs, metas, dists):
+        meta = meta or {}  # chroma can hand back None metadata; never let .get crash a query
         out.append(
             Retrieved(
                 text=doc,
