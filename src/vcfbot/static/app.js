@@ -795,7 +795,12 @@ const planner = (() => {
 
   function checkbox(c) {
     const req = !!c.required;
-    return `<label class="pl-check"><input type="checkbox" data-component="${escapeAttr(c.key)}"${req ? ' checked' : ''}>` +
+    // Required components are locked on (checked + disabled) — a supported
+    // deployment can't omit them. gather() still reads disabled checkboxes, and
+    // the server merges DEFAULTS, so the value is sent either way.
+    const lock = req ? ' checked disabled' : '';
+    const title = req ? ' title="Mandatory for a supported deployment — always deployed, can\'t be removed here."' : '';
+    return `<label class="pl-check${req ? ' pl-check--locked' : ''}"${title}><input type="checkbox" data-component="${escapeAttr(c.key)}"${lock}>` +
       `<span>${escapeAttr(c.label)}${req ? '<em class="pl-req">required</em>' : ''}</span></label>`;
   }
 

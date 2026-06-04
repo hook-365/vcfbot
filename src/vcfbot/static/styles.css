@@ -1691,6 +1691,7 @@ body[data-view="planner"] .dock { display: none !important; }
 }
 .pl-check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 .pl-check:hover { color: var(--ink-1); }
+.pl-check--locked, .pl-check--locked input { cursor: default; }
 .pl-req {
   font-family: var(--font-mono);
   font-style: normal;
