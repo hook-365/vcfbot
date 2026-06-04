@@ -114,6 +114,39 @@ DEFAULTS = {
 }
 
 
+# ── Workload domains ──────────────────────────────────────────────────────
+# A workload domain's MANAGEMENT plane (its vCenter + NSX Manager) is deployed in
+# the management domain, so adding one grows THIS sizing (its workload hosts are
+# separate and not sized here). Each domain maps to a row w01..wNN (rows 43..):
+# set Select=Included + the chosen sizes; rows left out stay Excluded (the
+# workbook's saved baseline), so removing a domain reverts cleanly. NSX model
+# "Shared" reuses the management NSX (no extra NSX Manager appliance).
+WLD_MAX = 35
+_WLD_FIRST_ROW = 43
+_WLD_INPUT_COLS = {"vcenter_size": "D", "nsx_model": "H", "nsx_size": "I"}
+WLD_VCENTER_SIZES = ["Small", "Medium", "Large", "XLarge"]  # Tiny omitted (mgmt-floor parity)
+WLD_NSX_MODELS = ["Dedicated - HA Cluster", "Dedicated - Single Node", "Shared"]
+WLD_NSX_SIZES = ["Small", "Medium", "Large", "XLarge"]
+WLD_DEFAULTS = {
+    "vcenter_size": "Medium",
+    "nsx_model": "Dedicated - HA Cluster",
+    "nsx_size": "Medium",
+}
+
+
+def _wld_overrides(domains: list[dict] | None) -> dict[str, str]:
+    """Cell overrides for a list of workload-domain configs (mapped w01, w02, …)."""
+    ov: dict[str, str] = {}
+    for i, d in enumerate((domains or [])[:WLD_MAX]):
+        row = _WLD_FIRST_ROW + i
+        ov[f"C{row}"] = "Included"
+        for key, col in _WLD_INPUT_COLS.items():
+            v = (d or {}).get(key)
+            if v:
+                ov[f"{col}{row}"] = v
+    return ov
+
+
 def options() -> dict:
     """Form metadata for the Planner UI: valid choices, components, defaults."""
     return {
@@ -124,6 +157,13 @@ def options() -> dict:
             {"key": k, "label": v, "required": k in REQUIRED_COMPONENTS}
             for k, v in COMPONENT_LABELS.items()
         ],
+        "workload_domain": {
+            "vcenter_sizes": WLD_VCENTER_SIZES,
+            "nsx_models": WLD_NSX_MODELS,
+            "nsx_sizes": WLD_NSX_SIZES,
+            "defaults": WLD_DEFAULTS,
+            "max": WLD_MAX,
+        },
         "defaults": DEFAULTS,
     }
 
@@ -251,9 +291,13 @@ def is_ready() -> bool:
     return _model is not None
 
 
-def compute(inputs: dict | None = None) -> SizingResult:
+def compute(
+    inputs: dict | None = None, workload_domains: list[dict] | None = None
+) -> SizingResult:
     """Recalculate the workbook with the given input overrides and read the
-    component sizing table + totals. `inputs` keys are INPUT_CELLS names.
+    component sizing table + totals. `inputs` keys are INPUT_CELLS names;
+    `workload_domains` is a list of {vcenter_size, nsx_model, nsx_size} configs
+    mapped onto rows w01, w02, … (their vCenter + NSX add to the footprint).
     """
     model = _load_model()
     overrides = {}
@@ -262,6 +306,10 @@ def compute(inputs: dict | None = None) -> SizingResult:
         if not cell:
             continue
         full = _key_for.get(cell)
+        if full:
+            overrides[full] = value
+    for ref, value in _wld_overrides(workload_domains).items():
+        full = _key_for.get(ref)
         if full:
             overrides[full] = value
 

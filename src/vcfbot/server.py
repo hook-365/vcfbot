@@ -53,6 +53,9 @@ class PlanRequest(BaseModel):
     # Friendly input names from planner.INPUT_CELLS; missing keys fall back to
     # the smallest-sensible defaults.
     inputs: dict = {}
+    # Optional workload domains: each {vcenter_size, nsx_model, nsx_size}. Their
+    # management appliances (vCenter + NSX) add to the management-domain footprint.
+    workload_domains: list = []
 
 
 def _cite_tag(source: str, page_start: int, page_end: int) -> str:
@@ -223,7 +226,9 @@ def create_app() -> FastAPI:
         merged = {**DEFAULTS, **(req.inputs or {})}
         try:
             # compute() compiles on first call (~60s) then ~4s; off the loop.
-            result = await asyncio.to_thread(compute, merged)
+            result = await asyncio.to_thread(
+                compute, merged, req.workload_domains or []
+            )
         except FileNotFoundError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
         except Exception as exc:  # noqa: BLE001

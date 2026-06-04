@@ -769,6 +769,8 @@ const planner = (() => {
   const statusEl = $('#planner-status');
   let opts = null;
   let built = false;
+  let wld = [];        // workload-domain configs: [{vcenter_size, nsx_model, nsx_size}]
+  let timer = null;    // debounce handle for live recompute
 
   // Input groups: [friendly_key, label, kind]. kind drives the control.
   const NUMS = [
@@ -804,6 +806,31 @@ const planner = (() => {
       `<span>${escapeAttr(c.label)}${req ? '<em class="pl-req">required</em>' : ''}</span></label>`;
   }
 
+  // ── Workload-domain cards (per-domain vCenter + NSX) ──
+  function wldSel(i, key, label, choices, val) {
+    const opt = (choices || []).map(c => `<option value="${escapeAttr(c)}"${c === val ? ' selected' : ''}>${escapeAttr(c)}</option>`).join('');
+    return `<div class="pl-field pl-field--sm"><label class="pl-field__label">${label}</label>
+      <select data-wld-i="${i}" data-wld-key="${escapeAttr(key)}">${opt}</select></div>`;
+  }
+  function renderWld() {
+    const box = $('#pl-wld'); if (!box) return;
+    const wd = opts.workload_domain || {};
+    if (!wld.length) {
+      box.innerHTML = '<p class="pl-wld-empty">Management domain only. Add a workload domain to size its vCenter + NSX (they run in the management domain).</p>';
+    } else {
+      box.innerHTML = wld.map((dm, i) => `
+        <div class="pl-wldcard">
+          <div class="pl-wldcard__head"><span>wld-${String(i + 1).padStart(2, '0')}</span>
+            <button type="button" class="pl-wldcard__rm" data-wld-remove="${i}" aria-label="Remove workload domain">×</button></div>
+          ${wldSel(i, 'vcenter_size', 'vCenter', wd.vcenter_sizes, dm.vcenter_size)}
+          ${wldSel(i, 'nsx_model', 'NSX model', wd.nsx_models, dm.nsx_model)}
+          ${wldSel(i, 'nsx_size', 'NSX size', wd.nsx_sizes, dm.nsx_size)}
+        </div>`).join('');
+    }
+    const add = $('#pl-wld-add');
+    if (add) add.disabled = wld.length >= (wd.max || 35);
+  }
+
   function buildForm() {
     const d = opts.defaults || {};
     const all = opts.components || [];
@@ -811,14 +838,15 @@ const planner = (() => {
     const optional = all.filter(c => !c.required).map(checkbox).join('');
     form.innerHTML = `
       <div class="pl-group">
-        <div class="pl-group__title">deployment</div>
+        <div class="pl-group__title">management domain</div>
         ${selField('size', 'Management vCenter size', opts.sizes || [], d.size)}
         ${selField('availability_model', 'Availability', opts.availability || [], d.availability_model)}
         ${selField('instance_model', 'Instance model', opts.instance_models || [], d.instance_model)}
       </div>
       <div class="pl-group">
-        <div class="pl-group__title">hosts</div>
-        ${NUMS.map(([k, l]) => numField(k, l, d[k])).join('')}
+        <div class="pl-group__title pl-group__title--row">workload domains
+          <button type="button" id="pl-wld-add" class="pl-addbtn">+ add domain</button></div>
+        <div class="pl-wld" id="pl-wld"></div>
       </div>
       ${required ? `<div class="pl-group">
         <div class="pl-group__title">core components</div>
@@ -828,12 +856,42 @@ const planner = (() => {
         <div class="pl-group__title">optional components</div>
         <div class="pl-checks">${optional}</div>
       </div>
+      <div class="pl-group">
+        <div class="pl-group__title">infrastructure (per host)</div>
+        ${NUMS.map(([k, l]) => numField(k, l, d[k])).join('')}
+      </div>
       <details class="pl-advanced">
         <summary>advanced</summary>
         <div class="pl-group">${ADV_NUMS.map(([k, l]) => numField(k, l, d[k])).join('')}</div>
-      </details>
-      <button class="pl-compute" type="submit">compute sizing →</button>`;
-    form.addEventListener('submit', (e) => { e.preventDefault(); compute(); });
+      </details>`;
+    renderWld();
+    // Live recompute — change fires on select/checkbox change and number blur.
+    form.addEventListener('change', onFormChange);
+    form.addEventListener('click', onFormClick);
+    form.addEventListener('submit', (e) => e.preventDefault());
+  }
+
+  function onFormChange(e) {
+    const t = e.target;
+    if (t.dataset && t.dataset.wldI != null && wld[+t.dataset.wldI]) {
+      wld[+t.dataset.wldI][t.dataset.wldKey] = t.value;
+    }
+    schedule();
+  }
+  function onFormClick(e) {
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.id === 'pl-wld-add') {
+      wld.push({ ...((opts.workload_domain || {}).defaults || {}) });
+      renderWld(); schedule();
+    } else if (t.dataset && t.dataset.wldRemove != null) {
+      wld.splice(+t.dataset.wldRemove, 1);
+      renderWld(); schedule();
+    }
+  }
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(compute, 250);
   }
 
   function gather() {
@@ -845,37 +903,66 @@ const planner = (() => {
     form.querySelectorAll('input[type="checkbox"][data-component]').forEach(cb => {
       inputs[cb.dataset.component] = cb.checked ? 'Include' : 'Exclude';
     });
-    return inputs;
+    return { inputs, workload_domains: wld.slice() };
   }
 
   function gnum(x) { return Number(x).toLocaleString('en-US'); }
+  function fmtStore(gb) {
+    const n = Number(gb) || 0;
+    return n >= 1024 ? (n / 1024).toFixed(1) + ' TB' : gnum(n) + ' GB';
+  }
+  function pick(hs, sub) {
+    const m = (hs || []).find(x => (x.label || '').toLowerCase().includes(sub.toLowerCase()));
+    return m ? String(m.value) : '—';
+  }
+  function statCard(num, lbl, sm) {
+    return `<div class="pl-stat${sm ? ' pl-stat--sm' : ''}"><span class="pl-stat__num">${escapeAttr(String(num))}</span><span class="pl-stat__lbl">${lbl}</span></div>`;
+  }
 
   function render(d) {
     if (!d.components || !d.components.length) {
       results.innerHTML = '<p class="pl-empty">No components in this configuration.</p>';
       return;
     }
+    const t = d.totals || {};
+    const hs = d.host_summary || [];
+    // Headline: the answer at a glance.
+    const headline = [
+      statCard(pick(hs, 'Hosts count'), 'physical hosts'),
+      statCard(gnum(t.vcpu), 'total vCPU'),
+      statCard(gnum(t.ram_gb) + ' GB', 'total RAM'),
+      statCard(fmtStore(t.disk_gb), 'total storage'),
+      statCard(gnum(t.nodes), 'appliance VMs'),
+    ].join('');
     const rows = d.components.map(c =>
       `<tr><td>${escapeAttr(c.name)}</td><td>${gnum(c.nodes)}</td><td>${gnum(c.vcpu)}</td><td>${gnum(c.ram_gb)}</td><td>${gnum(c.disk_gb)}</td></tr>`
     ).join('');
-    const t = d.totals || {};
-    const hasRuntime = d.components.some(c => /VCF services runtime/i.test(c.name));
-    const hs = d.host_summary || [];
-    const hostRows = hs.map(x =>
-      `<tr><td>${escapeAttr(x.label)}</td><td>${escapeAttr(String(x.value))}</td></tr>`
-    ).join('');
+    // Per physical host (sized for N−1 failure).
+    const perHost = [
+      statCard(pick(hs, 'CPU usage Per Host'), 'CPU / host', true),
+      statCard(pick(hs, 'RAM usage Per Host'), 'RAM / host', true),
+      statCard(pick(hs, 'Storage per Host'), 'storage / host', true),
+      statCard(pick(hs, 'Storage Type'), 'storage type', true),
+    ].join('');
+    // vSAN capacity build-up (collapsible detail).
+    const vsanKeys = ['Virtual Machine Capacity', 'Swap File', 'Interim Total', 'Redundancy', 'Host Rebuild', 'Estimated Growth'];
+    const vsan = hs.filter(x => vsanKeys.some(k => (x.label || '').includes(k)))
+      .map(x => `<tr><td>${escapeAttr(x.label)}</td><td>${escapeAttr(String(x.value))}</td></tr>`).join('');
+
     results.innerHTML = `
+      <div class="pl-stats">${headline}</div>
+      <h4 class="pl-subhead">components</h4>
       <table class="pl-table">
         <thead><tr><th>component</th><th>nodes</th><th>vCPU</th><th>RAM (GB)</th><th>storage (GB)</th></tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr><td>total</td><td>${gnum(t.nodes)}</td><td>${gnum(t.vcpu)}</td><td>${gnum(t.ram_gb)}</td><td>${gnum(t.disk_gb)}</td></tr></tfoot>
       </table>
-      ${hasRuntime ? `<p class="pl-note pl-note--gloss"><strong>VCF services runtime</strong> (control + worker nodes) is the Kubernetes-based platform that runs VCF's management services — fleet lifecycle, SDDC Manager, software depot — introduced in VCF 9.x. It deploys with every management domain.</p>` : ''}
       ${hs.length ? `
-        <h4 class="pl-subhead">host requirement summary</h4>
-        <table class="pl-table pl-table--kv"><tbody>${hostRows}</tbody></table>
-        <p class="pl-note">How many physical ESX hosts the configuration needs, per-host utilization (sized to tolerate one host failure, N−1), and the vSAN capacity build-up — this is what the host size, oversubscription, and reserve inputs drive. (The component <em>nodes</em> above are appliance VMs; <em>hosts</em> here are physical servers.)</p>` : ''}
-      <p class="pl-note">Computed by the VCF Planning &amp; Preparation Workbook's own formulas (no hand-coded math). Figures are appliance footprint; physical host capacity, vSAN overhead and growth headroom are modeled separately in the workbook.</p>`;
+        <h4 class="pl-subhead">per physical host <span class="pl-subhead__hint">sized for one-host-failure (N−1)</span></h4>
+        <div class="pl-stats pl-stats--sm">${perHost}</div>
+        ${vsan ? `<details class="pl-vsan"><summary>vSAN capacity build-up</summary>
+          <table class="pl-table pl-table--kv"><tbody>${vsan}</tbody></table></details>` : ''}` : ''}
+      <p class="pl-note">Computed by the VCF Planning &amp; Preparation Workbook's own formulas (no hand-coded math). A workload domain's vCenter + NSX deploy in the management domain and are included above; its workload hosts are sized separately. Appliance <em>nodes</em> are VMs; <em>hosts</em> are physical servers.</p>`;
   }
 
   async function compute() {
@@ -888,7 +975,7 @@ const planner = (() => {
       const r = await fetch('/api/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs: gather() }),
+        body: JSON.stringify(gather()),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
@@ -914,8 +1001,8 @@ const planner = (() => {
       return;
     }
     buildForm();
-    results.innerHTML = '<p class="pl-empty">Smallest supported layout shown below — adjust inputs and recompute.</p>';
-    compute(); // auto-show the default smallest config
+    results.innerHTML = '<p class="pl-empty">Computing the smallest supported layout…</p>';
+    compute(); // auto-show the default; recomputes live as inputs change
   }
 
   return { ensure };
