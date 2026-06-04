@@ -860,6 +860,10 @@ const planner = (() => {
     ).join('');
     const t = d.totals || {};
     const hasRuntime = d.components.some(c => /VCF services runtime/i.test(c.name));
+    const hs = d.host_summary || [];
+    const hostRows = hs.map(x =>
+      `<tr><td>${escapeAttr(x.label)}</td><td>${escapeAttr(String(x.value))}</td></tr>`
+    ).join('');
     results.innerHTML = `
       <table class="pl-table">
         <thead><tr><th>component</th><th>nodes</th><th>vCPU</th><th>RAM (GB)</th><th>storage (GB)</th></tr></thead>
@@ -867,6 +871,10 @@ const planner = (() => {
         <tfoot><tr><td>total</td><td>${gnum(t.nodes)}</td><td>${gnum(t.vcpu)}</td><td>${gnum(t.ram_gb)}</td><td>${gnum(t.disk_gb)}</td></tr></tfoot>
       </table>
       ${hasRuntime ? `<p class="pl-note pl-note--gloss"><strong>VCF services runtime</strong> (control + worker nodes) is the Kubernetes-based platform that runs VCF's management services — fleet lifecycle, SDDC Manager, software depot — introduced in VCF 9.x. It deploys with every management domain.</p>` : ''}
+      ${hs.length ? `
+        <h4 class="pl-subhead">host requirement summary</h4>
+        <table class="pl-table pl-table--kv"><tbody>${hostRows}</tbody></table>
+        <p class="pl-note">How many physical ESX hosts the configuration needs, per-host utilization (sized to tolerate one host failure, N−1), and the vSAN capacity build-up — this is what the host size, oversubscription, and reserve inputs drive. (The component <em>nodes</em> above are appliance VMs; <em>hosts</em> here are physical servers.)</p>` : ''}
       <p class="pl-note">Computed by the VCF Planning &amp; Preparation Workbook's own formulas (no hand-coded math). Figures are appliance footprint; physical host capacity, vSAN overhead and growth headroom are modeled separately in the workbook.</p>`;
   }
 

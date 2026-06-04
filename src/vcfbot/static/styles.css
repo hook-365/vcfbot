@@ -1782,6 +1782,17 @@ body[data-view="planner"] .dock { display: none !important; }
   padding-top: 0.7em;
 }
 .pl-table tfoot td:not(:first-child) { color: var(--accent); }
+.pl-subhead {
+  margin: var(--space-lg) 0 var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+.pl-table--kv td:first-child { white-space: normal; }
+.pl-table--kv td:last-child { color: var(--accent); font-weight: 500; white-space: nowrap; }
 .pl-note {
   margin-top: var(--space-md);
   font-size: var(--step--2);

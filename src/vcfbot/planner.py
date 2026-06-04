@@ -51,10 +51,22 @@ INPUT_CELLS: dict[str, str] = {
 }
 
 # Component output table: label in col G, [nodes, vCPU, RAM, disk] in J/K/L/M.
+# These are the APPLIANCE footprints — host-size-independent.
 _LABEL_COL = "G"
 _OUT_COLS = {"nodes": "J", "vcpu": "K", "ram_gb": "L", "disk_gb": "M"}
 _COMPONENT_ROWS = range(8, 33)   # management + workload component rows
 _TOTALS_ROW = 33
+
+# "Host Requirement Summary" block (col O label / col R value): how many physical
+# ESX hosts the chosen appliances need, per-host CPU/RAM/storage utilization
+# (sized for N-1 host failure), and the vSAN capacity build-up. THIS is what the
+# host-size / oversubscription / reserve inputs drive — the component table above
+# is host-independent, which is why those inputs otherwise look inert. Header rows
+# ("Management Hosts", "Component") carry no value pair and are skipped.
+_HOST_LABEL_COL = "O"
+_HOST_VALUE_COL = "R"
+_HOST_SUMMARY_ROWS = range(8, 22)
+_HOST_SUMMARY_SKIP = {"component", "management hosts"}
 
 
 # Valid option lists + friendly labels for the UI form. Values are the literal
@@ -132,6 +144,7 @@ class SizingResult:
     total_vcpu: float = 0.0
     total_ram_gb: float = 0.0
     total_disk_gb: float = 0.0
+    host_summary: list[dict] = field(default_factory=list)  # [{label, value}]
     inputs: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -152,6 +165,7 @@ class SizingResult:
                 "ram_gb": self.total_ram_gb,
                 "disk_gb": self.total_disk_gb,
             },
+            "host_summary": self.host_summary,
             "inputs": self.inputs,
         }
 
@@ -170,6 +184,14 @@ def _num(v):
         return float(v)
     m = re.search(r"-?\d+(?:\.\d+)?", str(v))
     return float(m.group(0)) if m else 0.0
+
+
+def _cell_str(v) -> str:
+    """Display string for a host-summary value: whole floats lose the '.0',
+    strings (e.g. '38 CPUs', 'vSAN-ESA', '5266 GB Disk') pass through."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
 
 
 def _workbook_path() -> Path:
@@ -271,4 +293,19 @@ def compute(inputs: dict | None = None) -> SizingResult:
     result.total_vcpu = _num(val(f"{_OUT_COLS['vcpu']}{_TOTALS_ROW}"))
     result.total_ram_gb = _num(val(f"{_OUT_COLS['ram_gb']}{_TOTALS_ROW}"))
     result.total_disk_gb = _num(val(f"{_OUT_COLS['disk_gb']}{_TOTALS_ROW}"))
+
+    # Host Requirement Summary — physical host count + per-host utilization + the
+    # vSAN capacity build-up (what the host/oversubscription/reserve inputs drive).
+    for row in _HOST_SUMMARY_ROWS:
+        label = val(f"{_HOST_LABEL_COL}{row}")
+        value = val(f"{_HOST_VALUE_COL}{row}")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        if value is None or str(value).strip() == "":
+            continue
+        if label.strip().lower() in _HOST_SUMMARY_SKIP:
+            continue
+        result.host_summary.append(
+            {"label": label.strip(), "value": _cell_str(value)}
+        )
     return result
