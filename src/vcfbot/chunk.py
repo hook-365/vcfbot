@@ -93,7 +93,32 @@ def chunk_pages(
             buf_page_end = None
         buf_section = None
 
+    def emit_atomic(page: Page) -> None:
+        text = page.text.strip()
+        if not text:
+            return
+        chunks.append(
+            Chunk(
+                id=_make_id(source, text),
+                source=source,
+                text=text,
+                page_start=page.page_num,
+                page_end=page.page_num,
+                section=page.section,
+            )
+        )
+
     for page in pages:
+        # Atomic pages (e.g. extracted tables) must survive as ONE chunk — flush
+        # any pending buffer, hard-reset (no overlap bleed across the boundary),
+        # and emit whole even if it exceeds target_tokens (_embed_adaptive in
+        # index.py truncates a single oversized input only if it overflows nomic).
+        if getattr(page, "atomic", False):
+            flush()
+            buf_parts, buf_tokens = [], 0
+            buf_page_start = buf_page_end = buf_section = None
+            emit_atomic(page)
+            continue
         for para in _split_paragraphs(page.text):
             ptoks = _token_count(para)
             # Oversize paragraph: hard-split on token boundary.

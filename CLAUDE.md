@@ -19,7 +19,8 @@ source links to Broadcom's hosted PDF at that exact page.
   the container.
 - httpx (fetch), pymupdf (extract), tiktoken (chunk-size estimation),
   chromadb (vector store), openai SDK (talks to any OpenAI-compatible
-  endpoint), FastAPI + uvicorn (web), click (CLI), rich (terminal UX).
+  endpoint), anthropic SDK (optional Claude chat provider — embeddings stay
+  local), FastAPI + uvicorn (web), click (CLI), rich (terminal UX).
 - Frontend: plain HTML + CSS + ES modules under `src/vcfbot/static/`.
   No build step. marked + DOMPurify from jsdelivr CDN.
 
@@ -37,27 +38,51 @@ completions and embeddings. Common shapes:
 The CLI/server picks the right client per operation — never assume one
 shared URL.
 
+- **Anthropic chat provider** (opt-in): set `CHAT_PROVIDER=anthropic` +
+  `ANTHROPIC_API_KEY` to route ONLY the synthesis step to Claude via the
+  native `anthropic` SDK. Embeddings stay local — the chat/embed split is
+  preserved. `providers.py` is the only chat-completion call site; both
+  `chat.py` and `server.py` go through it. Default `CHAT_PROVIDER=local`.
+
 ## Layout
 
 ```
 src/vcfbot/
-  sources.py        # PDF registry — name, PDF url, web landing url
+  sources.py        # PDF registry; vcf_source() templates URLs from one version string
   fetch.py          # downloader with Last-Modified caching; sends a Chrome UA
-  extract.py        # pymupdf → per-page text + TOC-based section paths
-  chunk.py          # tiktoken-aware chunker, preserves page ranges per chunk
-  index.py          # embeds + upserts into chromadb; token-aware batching + adaptive retry
+  extract.py        # pymupdf → per-page text + TOC-based section paths; atomic
+                    #   table chunks (find_tables); xlsx → one ATOMIC per-appliance fact
+  chunk.py          # tiktoken-aware chunker, preserves page ranges; atomic pages
+                    #   (tables, per-appliance facts) emit as one indivisible chunk
+  index.py          # embed + upsert; query / query_multi; component_manifest +
+                    #   select_components (corpus-derived, embedding-ranked components)
+  retrieve.py       # multi-query retrieval (single entry point for chat + server):
+                    #   embedding component-selection for specific Qs; doc-inventory
+                    #   anchoring for "all components" Qs; per-component sizing AND
+                    #   classification sub-queries; round-robin merge; rerank+cut
+  rerank.py         # optional cross-encoder rerank (Voyage /rerank); query-time,
+                    #   no re-index; falls back to embedding order on any failure
+  planner.py        # drives the Planning Workbook's own sizing formulas (formulas
+                    #   lib) as a calculator — `vcfbot plan` / /api/plan
+  providers.py      # chat-completion providers: local (OpenAI-compat) | anthropic
   changelog.py      # append-only JSONL log of corpus updates
   chat.py           # terminal RAG REPL
-  server.py         # FastAPI: /api/status, /api/chat (SSE), /api/changelog
-  config.py         # env-driven settings (CHAT_BASE_URL, EMBED_BASE_URL, TARGET_TOKENS, …)
+  server.py         # FastAPI: /api/status, /api/chat (SSE), /api/changelog, /api/plan
+  config.py         # env-driven settings (CHAT_PROVIDER, ANTHROPIC_*, MULTI_QUERY,
+                    #   RERANK_*, TABLE_CHUNKS, …)
   __init__.py       # click CLI (fetch / index / update / chat / serve / status)
   __main__.py       # `python -m vcfbot …` entry point for `docker exec`
   static/
-    index.html      # web UI; two dialogs (About, Changelog), composer, source cards
+    index.html      # web UI; chat|planner view tabs; status rail (chat/embed/
+                    #   chunks/top-k/multi-q/rerank); About + Changelog dialogs
     styles.css      # design tokens + components
-    app.js          # streaming SSE client, citation handling, theme + export
+    app.js          # streaming SSE client, citation handling, theme + export;
+                    #   status rail population; planner module
 scripts/
   daily-update.sh   # cron target (runs `python -m vcfbot update` in the container)
+  eval.py           # accuracy regression harness — fixed engineer-question
+                    #   battery vs /api/chat; behavioral smoke checks, no
+                    #   version-specific facts (stdlib only)
 data/
   pdfs/             # downloaded source PDFs (gitignored)
   chroma/           # chromadb persistent collection (gitignored)
@@ -86,7 +111,91 @@ docker exec vcfbot python -m vcfbot <cmd>         # we don't pip-install in the
                                                   # script entry isn't on PATH;
                                                   # use python -m vcfbot
 bash scripts/daily-update.sh                      # on-demand refresh
+python scripts/eval.py                            # accuracy regression battery
+python scripts/eval.py --quick                    # flagship question only
 ```
+
+## Retrieval & synthesis architecture
+
+Retrieval is the solvable-locally half; synthesis quality is model-bound.
+
+- **Multi-query retrieval** (`retrieve.py`, gated by `MULTI_QUERY`, default on).
+  A single dense query embedding sits in ONE neighborhood, so broad
+  multi-component questions land in one neighborhood and starve the rest.
+  Two modes:
+  - **Specific question** → `index.select_components` ranks the
+    corpus-derived component manifest (`index.component_manifest`, harvested
+    from `… Detailed Design` / `… Model` TOC headings, deduped via
+    `_contains_phrase`) by embedding cosine to the question; components within
+    `_SCOPE_MARGIN` of the top fan out one sub-query each. One clear winner →
+    plain single-query fallback.
+  - **Breadth question** ("all/every component", matched by `_BREADTH_RE`) →
+    narrowing is wrong and there's no single sizing table, so it ANCHORS ON
+    THE DOC'S OWN INVENTORY: `_extract_inventory_components` gathers the
+    management-components inventory text (fixed probes) and has the chat model
+    extract the component names from that grounded text (a reliable copy task),
+    then for EACH extracted component fans out TWO sub-queries: a **sizing**
+    one (`"{c} — {question}"`) AND a **classification** one
+    (`_classification_subquery`: "Is {c} required/optional/essential/always-
+    deployed?"). Without the classification sub-query the pool is all sizing
+    chunks and the model guesses required-vs-optional from the Planning
+    Workbook's *selectability*, mislabeling essential components (e.g. VCF
+    Operations) as optional. The classification sub-query pulls the docs' own
+    "is this required" wording into the pool. TOC manifest is the fallback.
+  - All sub-queries (+ the original, always sub-query #1) are **round-robin
+    merged** in `index.query_multi` — interleave, NOT global distance sort, so
+    a dominant neighborhood can't crowd out the others.
+- **Cross-encoder reranking** (`rerank.py`, gated by `RERANK_ENABLED`, default
+  off; Voyage `/rerank` by default). Bi-encoder dense retrieval embeds query and
+  chunk separately, so the authoritative chunk (e.g. a classification table in a
+  *security* blueprint) can sink below topically-closer-but-wrong chunks. When
+  on, `retrieve()` over-retrieves a larger pool (`RERANK_TOP_N`, default 100),
+  then `_finish` reranks query+chunk TOGETHER and cuts to the final size:
+  `TOP_K` for single/specific Qs, `_BREADTH_KEEP` (24) for breadth so every
+  component's sizing + the classification chunk survive. Query-time only, no
+  re-index; any failure (no key, network) falls back to embedding order — rerank
+  is a precision booster, never a hard dependency.
+- **Component enumeration is corpus-derived, never hardcoded** — it tracks VCF
+  versions. Hardcoding component names is the version-rot bias to avoid; the
+  inventory probes only STEER retrieval to the right pages, the names come from
+  the doc text. (SDDC Manager has no `… Detailed Design`/`… Model` section, so
+  it's not in the TOC manifest — only the inventory-anchor path surfaces it.)
+- **Required-vs-optional is a SYNTHESIS rule, not a pinned page.** Don't probe
+  for the specific page/table that states a classification — Broadcom re-paginates
+  and those rot (see gotcha 8). Two version-robust layers instead: (1) the
+  per-component classification sub-query above (names come from live extraction,
+  the query is a *question* so it pins no page); (2) a generic SYSTEM_PROMPT rule
+  that keys off the docs' OWN words — *essential / core / mandatory / "always
+  deployed"* → required; a sizing workbook letting you DESELECT a component is a
+  capacity-modeling convenience, NOT an optional-for-support signal; an explicit
+  "mandatory" statement outranks a workbook toggle or a capability description.
+  Verified both directions on the SAME rule: VCF Operations → required (docs say
+  mandatory/always-deployed), VCF Automation → optional (docs describe it as a
+  Day-N deploy). Omitting a genuinely-optional component from a minimal answer
+  is correct, not a bug — never force it in (that's the bias we avoid).
+- **The synthesis ceiling.** With reliable retrieval, the remaining failures
+  (dropping components, conflating sizing numbers across chunks, mis-applying
+  required-vs-optional / min-vs-ceiling) are the chat model's. A small local
+  model (qwen3-8b) is shaky here; `CHAT_PROVIDER=anthropic` (Sonnet/Opus, with
+  adaptive thinking) fixes it on the SAME retrieved context. The system prompt
+  encodes the behavioral rules (min-vs-ceiling, required-vs-optional grounded in
+  the docs' own words, scenario-match for greenfield/upgrade/expansion, cite
+  every claim) — it lives in BOTH `chat.py` and `server.py`; keep them in sync
+  (a `diff` of the two SYSTEM_PROMPT blocks should be empty). `scripts/eval.py`
+  is the regression check after any prompt/retrieval/model change.
+- **Open retrieval gap: greenfield procedural questions.** "Prerequisites/steps
+  to deploy a NEW management domain" embeds nearer the UPGRADE-framed "Deploy
+  VCF Management Services" pages, so retrieval under-serves the greenfield
+  prereqs (which DO exist — `VCF-MS-REQD-FIRST-*` DNS entries, the VCF Installer
+  wizard prereqs). The scenario-match prompt rule makes the model say so
+  honestly rather than pass off upgrade steps as greenfield, but the real fix is
+  retrieval-side query decomposition for non-component procedural questions (not
+  built; `_BREADTH_RE`-style fan-out only covers "all components" today).
+- **Retrieval depth is bound by the chat model's context window.** Local
+  qwen3-8b on Apollo is 12288-ctx, capping `TOP_K` ~20 and the breadth fan-out.
+  A cloud model (Sonnet/Opus, ~1M ctx) lifts that — depth could be raised when
+  `CHAT_PROVIDER=anthropic`. If you make retrieval depth larger, make it
+  provider-aware so the local path doesn't overflow.
 
 ## Critical gotchas
 
@@ -173,6 +282,57 @@ bash scripts/daily-update.sh                      # on-demand refresh
     primary user has a different uid, change the Dockerfile's `1000` to
     match, or override at runtime via compose `user:`.
 
+13. **Shell env shadows `.env` in docker-compose.** Compose resolves
+    `${VAR}` interpolation from the shell environment FIRST, then `.env`.
+    A stale `export ANTHROPIC_API_KEY=…` in your shell rc will override the
+    key in `.env` and silently feed the container the wrong key (symptom:
+    `401 invalid x-api-key` even after fixing `.env`). Fix: keep secrets only
+    in `.env` (don't export them), or recreate with
+    `env -u ANTHROPIC_API_KEY docker compose up -d`.
+
+14. **Source URLs are templated from one `version` string.** `sources.py`
+    `vcf_source("9.1")` builds the PDF url, web url, and name from the version
+    (techdocs embeds it 4×). A minor bump is one edit; a major bump overrides
+    the `series_dir` / `series_umbrella` slugs. Don't hand-write the URLs —
+    that's the version-rot trap. Per-section HTML deep-links are deliberately
+    NOT used (their slugs change every version); citations point at the PDF
+    `#page=N`, which is stable and derivable from our own metadata.
+
+15. **Haiku 4.5 400s on adaptive thinking.** `thinking: {type: "adaptive"}` is
+    supported on Opus 4.x and Sonnet 4.6 but NOT Haiku 4.5 — sending it returns
+    a 400. `providers.py::_anthropic_extra` gates it by model-name substring
+    (`opus`/`sonnet`) so Haiku stays usable as the cheap default
+    (`ANTHROPIC_MODEL=claude-haiku-4-5`, ~$0.009/q). Add the attr ONLY for models
+    that support it; don't send a fixed `budget_tokens` (deprecated on 4.x).
+
+16. **Rerank is a THIRD external provider (Voyage), distinct from chat & embed.**
+    Keep the split clean: embeddings → `index.py::_client` (local), chat →
+    `providers.py` (local OR Anthropic), rerank → `rerank.py` (Voyage `/rerank`).
+    Never cross-wire them (Voyage has no chat/embeddings here; Anthropic has no
+    embeddings). `RERANK_API_KEY` falls back to `VOYAGE_API_KEY`. Rerank failures
+    degrade silently to embedding order — it's a precision booster, not a hard
+    dependency, so a missing/invalid key never breaks retrieval.
+
+17. **Required-vs-optional must not be pinned to pages.** A natural fix for
+    component-classification misses is to probe for the specific page/table that
+    states it. DON'T — those rot on re-pagination (gotcha 8).
+    The signal enters retrieval via a per-component classification *question*
+    sub-query (doc-derived names, no page) and is resolved by a generic
+    SYSTEM_PROMPT rule keyed off the docs' words. See "Retrieval & synthesis
+    architecture". Same lesson generalizes: steer with semantics, never citations.
+
+18. **Workbook per-appliance sizing facts are ATOMIC chunks** (`extract_xlsx`
+    sets `Page.atomic=True`). The xlsx statements are short, so the 220-token
+    chunker would otherwise repack several appliances into one chunk — recreating
+    the dense multi-appliance grid the workbook split apart, which makes the chat
+    model CONFLATE numbers (attribute one appliance's GB/vCPU to another). Atomic
+    = one appliance per chunk = clean attribution. Verified: it eliminated qwen3's
+    cross-appliance conflation on the flagship sizing question (3/3 runs) and
+    helps every model. Changing the xlsx chunking is a workbook-only re-index
+    (`index_pdf_incremental` on the `.xlsx`) — the 9k-page PDF is untouched.
+    NOTE: the planner reads the workbook directly via the `formulas` engine, NOT
+    via these chunks, so chunking changes never affect the calculator.
+
 ## Daily-update mechanism
 
 Cron entry on the deployment host:
@@ -237,9 +397,11 @@ Future work to speed up forced rebuilds:
 - Prefer **config-driven additions** over restructuring. New PDFs are new
   rows in `sources.py`. New env knobs go in `config.py`. New embedder
   support extends the `_*_prefix` family in `index.py`.
-- Keep the **chat ↔ embed endpoint split** clean. They route through
-  different OpenAI client instances in `index.py::_client` and
-  `chat.py` / `server.py`. Don't conflate them.
+- Keep the **chat ↔ embed split** clean. Embeddings always go through
+  `index.py::_client` (local OpenAI-compatible). Chat goes through
+  `providers.py` (local OR Anthropic, per `CHAT_PROVIDER`). Don't conflate
+  them — never route embeddings to Anthropic (it has no embeddings API), and
+  don't add a chat client outside `providers.py`.
 - Don't rebuild the heading heuristic. If sections look off, fix the TOC
   walker in `extract.py::_build_section_map`.
 - If you must re-index, do it in a tracked background process. It is now

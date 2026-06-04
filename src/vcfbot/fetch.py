@@ -31,8 +31,12 @@ class FetchResult:
     cached: bool
 
 
-def _meta_path(pdf_path: Path) -> Path:
-    return pdf_path.with_suffix(".meta.json")
+def _ext(source: Source) -> str:
+    return ".xlsx" if source.kind == "xlsx" else ".pdf"
+
+
+def _meta_path(file_path: Path) -> Path:
+    return file_path.with_suffix(".meta.json")
 
 
 def _load_meta(pdf_path: Path) -> dict | None:
@@ -47,7 +51,7 @@ def _load_meta(pdf_path: Path) -> dict | None:
 
 def fetch_one(source: Source, out_dir: Path, force: bool = False) -> FetchResult:
     out_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = out_dir / f"{source.name}.pdf"
+    pdf_path = out_dir / f"{source.name}{_ext(source)}"
     prev_meta = None if force else _load_meta(pdf_path)
 
     headers = {
@@ -73,7 +77,7 @@ def fetch_one(source: Source, out_dir: Path, force: bool = False) -> FetchResult
             resp.raise_for_status()
             hasher = hashlib.sha256()
             total = 0
-            tmp_path = pdf_path.with_suffix(".pdf.part")
+            tmp_path = pdf_path.with_name(pdf_path.name + ".part")
             with tmp_path.open("wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=64 * 1024):
                     fh.write(chunk)

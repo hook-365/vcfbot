@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -13,7 +14,7 @@ from openai import BadRequestError, InternalServerError
 
 from .chunk import Chunk, _ENC, chunk_pages
 from .config import Settings, load_settings
-from .extract import extract_pages
+from .extract import extract_source
 
 # Apollo's llamacpp-embed server is launched with `--batch-size 2048`; LM
 # Studio's defaults are typically higher. We can't easily count tokens in the
@@ -161,7 +162,7 @@ def index_pdf(
     log = on_progress or (lambda _msg: None)
 
     log(f"extracting pages from {pdf_path.name}")
-    pages = extract_pages(pdf_path)
+    pages = extract_source(pdf_path, tables=settings.table_chunks)
     log(f"extracted {len(pages)} pages with text")
 
     chunks: list[Chunk] = chunk_pages(
@@ -214,9 +215,190 @@ def query(text: str, settings: Settings | None = None, k: int | None = None):
     )
 
 
+def query_multi(
+    texts: list[str], settings: Settings | None = None, k_total: int | None = None
+):
+    """Retrieve for several sub-queries and round-robin merge the results.
+
+    Each sub-query is embedded and run against chroma independently, then the
+    per-query hit lists are interleaved (best-of-each, then second-best-of-each,
+    ...) with dedup by chunk id. Interleaving — rather than a single global
+    distance sort — is the whole point: a tightly-matching neighborhood (e.g.
+    one component whose page states the spec verbatim) would otherwise dominate
+    every slot and starve the other facets, which is exactly the failure
+    single-query retrieval has on broad questions. Returns the same shape as
+    `query()` (one merged result list) so callers are interchangeable.
+    """
+    settings = settings or load_settings()
+    collection = _collection(settings)
+    k_total = k_total or settings.top_k
+    client = _client(settings)
+    prefix = _query_prefix(settings.embed_model)
+    embs = _embed_adaptive(client, settings.embed_model, [prefix + t for t in texts])
+    # Pull a generous slice per sub-query so the merge has options to dedup against.
+    per = max(k_total, 10)
+    res = collection.query(
+        query_embeddings=embs,
+        n_results=per,
+        include=["documents", "metadatas", "distances"],
+    )
+    ids = res.get("ids") or []
+    docs = res.get("documents") or []
+    metas = res.get("metadatas") or []
+    dists = res.get("distances") or []
+    nq = len(texts)
+    seen: set = set()
+    out_docs: list = []
+    out_metas: list = []
+    out_dists: list = []
+    for rank in range(per):
+        for qi in range(nq):
+            if len(out_docs) >= k_total:
+                break
+            if qi >= len(docs) or rank >= len(docs[qi]):
+                continue
+            key = (
+                ids[qi][rank]
+                if qi < len(ids) and rank < len(ids[qi])
+                else docs[qi][rank]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out_docs.append(docs[qi][rank])
+            out_metas.append(metas[qi][rank])
+            out_dists.append(dists[qi][rank])
+        if len(out_docs) >= k_total:
+            break
+    return {
+        "documents": [out_docs],
+        "metadatas": [out_metas],
+        "distances": [out_dists],
+    }
+
+
 def collection_count(settings: Settings | None = None) -> int:
     settings = settings or load_settings()
     return _collection(settings).count()
+
+
+# Component areas are derived from the PDF outline (TOC) headings rather than
+# hardcoded, so they self-update when the corpus is re-indexed for a new VCF
+# version. DITA-OT docs name each component chapter "<Component> Detailed
+# Design" or "<Component> Model" — harvesting those segments yields the live
+# component manifest (e.g. License Server, VCF Automation, Private AI) without
+# baking version-specific knowledge into code or prompts.
+_MANIFEST_RE = re.compile(r"^(.*?)\s+(?:Detailed Design|Model)$")
+# Memoized per (chroma_dir, collection) and invalidated when the chunk count
+# changes — a full corpus scan is too costly to repeat every query, but it only
+# needs recomputing after an index/update.
+_MANIFEST_CACHE: dict[tuple[str, str], tuple[int, list[str]]] = {}
+
+
+def component_manifest(
+    settings: Settings | None = None, min_count: int = 5, cap: int = 60
+) -> list[str]:
+    """Return the corpus's component areas, most-documented first.
+
+    Harvested live from section-path metadata; cached until the collection's
+    chunk count changes. Returns [] if the collection is empty or unscannable,
+    in which case callers should fall back to plain behavior.
+    """
+    settings = settings or load_settings()
+    collection = _collection(settings)
+    key = (str(settings.chroma_dir), settings.collection)
+    count = collection.count()
+    cached = _MANIFEST_CACHE.get(key)
+    if cached and cached[0] == count:
+        return cached[1]
+
+    areas: dict[str, int] = {}
+    offset = 0
+    step = 5000
+    while True:
+        got = collection.get(include=["metadatas"], limit=step, offset=offset)
+        metas = got.get("metadatas") or []
+        if not metas:
+            break
+        for meta in metas:
+            section = (meta or {}).get("section", "") or ""
+            for seg in section.split("›"):
+                m = _MANIFEST_RE.match(seg.strip())
+                if not m:
+                    continue
+                name = m.group(1).strip()
+                if 2 < len(name) < 40:
+                    areas[name] = areas.get(name, 0) + 1
+        offset += step
+
+    candidates = [n for n, c in areas.items() if c >= min_count]
+    # Collapse topology/availability variants to their base component, purely by
+    # structure (no hardcoded qualifier list): processing shortest-first, drop
+    # any label that contains an already-kept label as a whole-word phrase. So
+    # "High Availability VCF Operations" and "Simple VCF Operations" fold into
+    # "VCF Operations"; "Single-Rack vSAN ESA Storage" folds into "Storage".
+    kept: list[str] = []
+    for label in sorted(candidates, key=len):
+        if not any(_contains_phrase(label, base) for base in kept):
+            kept.append(label)
+    items = sorted(kept, key=lambda n: areas[n], reverse=True)[:cap]
+    _MANIFEST_CACHE[key] = (count, items)
+    return items
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    """True if `phrase` appears in `text` as a whole-word contiguous phrase."""
+    return re.search(rf"(?:^|\W){re.escape(phrase)}(?:\W|$)", text) is not None
+
+
+# Component-label embeddings, cached alongside the manifest (same invalidation
+# on chunk-count change). Embedding the labels lets us pick the components
+# RELEVANT to a question by cosine similarity instead of asking the small chat
+# model to filter a long menu — which it does unreliably. Labels are embedded
+# as "documents" (the thing being matched); the question uses the query prefix.
+_LABEL_EMB_CACHE: dict[tuple[str, str], tuple[int, list[str], list[list[float]]]] = {}
+
+
+def _component_label_embeddings(
+    settings: Settings,
+) -> tuple[list[str], list[list[float]]]:
+    collection = _collection(settings)
+    key = (str(settings.chroma_dir), settings.collection)
+    count = collection.count()
+    cached = _LABEL_EMB_CACHE.get(key)
+    if cached and cached[0] == count:
+        return cached[1], cached[2]
+    labels = component_manifest(settings)
+    embs: list[list[float]] = []
+    if labels:
+        client = _client(settings)
+        prefix = _doc_prefix(settings.embed_model)
+        embs = _embed_adaptive(client, settings.embed_model, [prefix + l for l in labels])
+    _LABEL_EMB_CACHE[key] = (count, labels, embs)
+    return labels, embs
+
+
+def select_components(
+    question: str, settings: Settings | None = None, top_n: int = 8
+) -> list[tuple[str, float]]:
+    """Return the manifest components most similar to `question`, best first.
+
+    Deterministic relevance selection by embedding cosine — no chat-model
+    judgment involved. Returns [(label, score), ...]; empty if no manifest.
+    """
+    settings = settings or load_settings()
+    labels, embs = _component_label_embeddings(settings)
+    if not labels:
+        return []
+    import numpy as np
+
+    q = np.asarray(embed_query(question, settings), dtype=float)
+    m = np.asarray(embs, dtype=float)
+    q = q / (float(np.linalg.norm(q)) or 1.0)
+    m = m / (np.linalg.norm(m, axis=1, keepdims=True) + 1e-9)
+    sims = m @ q
+    order = np.argsort(-sims)[:top_n]
+    return [(labels[int(i)], float(sims[int(i)])) for i in order]
 
 
 def index_pdf_incremental(
@@ -235,7 +417,7 @@ def index_pdf_incremental(
     log = on_progress or (lambda _msg: None)
 
     log(f"extracting pages from {pdf_path.name}")
-    pages = extract_pages(pdf_path)
+    pages = extract_source(pdf_path, tables=settings.table_chunks)
     log(f"extracted {len(pages)} pages with text")
 
     chunks: list[Chunk] = chunk_pages(

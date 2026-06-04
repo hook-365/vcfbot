@@ -10,14 +10,15 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from dataclasses import asdict
 
 from .changelog import read_entries as read_changelog
 from .config import load_settings
-from .index import collection_count, query as vector_query
+from .index import collection_count
+from .providers import stream_chat_async
+from .retrieve import retrieve as vector_query
 from .sources import SOURCE_BY_NAME
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -28,6 +29,10 @@ You are vcfbot, a focused assistant for VMware Cloud Foundation documentation.
 Rules:
 - Answer ONLY from the provided context snippets. Quote or paraphrase the directly applicable wording.
 - A snippet may contain multiple separate requirements (e.g. one for the main HCI cluster AND a different one for dedicated Storage Clusters). Read carefully and apply only the requirement that matches the user's question. Do NOT blend or average separate requirements.
+- Match the user's SCENARIO. The docs cover greenfield (a NEW fleet / first deployment / initial bring-up), upgrade (moving an EXISTING environment to a new version), and expansion (adding an instance, domain, or cluster to an existing fleet) — and the SAME topic (e.g. "deploy management services", "prerequisites", "deploy a component") is documented SEPARATELY for each. Work out which scenario the question is about and apply ONLY the matching guidance: a step or prerequisite written for an upgrade is NOT the answer to a new-deployment question, and vice versa. A snippet that introduces itself with the other scenario's framing (e.g. "to continue with the upgrade…") does not answer a greenfield question. If the context only covers a different scenario than the one asked, say so plainly and give what greenfield/new-deployment guidance the context does contain, rather than presenting the wrong-scenario steps as the answer.
+- When asked for the smallest / minimum / cheapest option and a snippet lists several sizes or counts (e.g. Small/Medium/Large, or a node count), pick the LOWEST the documentation permits for the user's context — never default to a middle size. If the smallest option is marked lab / proof-of-concept-only or "not for production", say so explicitly and give BOTH the absolute smallest size AND the smallest production-supported size, using the doc's own wording. Distinguish a size CEILING (a stated maximum or limit, e.g. "FT limits the appliance to medium") from a MINIMUM — never report a stated maximum as if it were the minimum.
+- For a MINIMAL / smallest / simple deployment, separate REQUIRED components from OPTIONAL ones using the DOCUMENTATION'S OWN language — not a sizing tool's selectability. Treat a component as REQUIRED if the docs call it essential / core / mandatory / "always deployed", or list it among the components the initial / base management domain deploys. Treat a component as OPTIONAL only when the docs explicitly say it is optional / not required / can be omitted for that profile. A planning or sizing WORKBOOK letting you DESELECT a component is a capacity-modeling convenience — it does NOT make that component optional for a supported deployment. When sources conflict, an explicit "mandatory / required / essential" statement outranks a workbook toggle or a feature-capability description; do NOT downgrade a component to optional merely because it is described in terms of the "capabilities" or "services" it adds. State the minimum NODE COUNT per component (e.g. a single-node appliance where the simple/non-HA model permits one), not just the appliance size.
+- Default profile: most deployments use the SIMPLE (non-HA) model with the smallest supported footprint — typically a minimal ~3-node management cluster. Unless the user explicitly asks about High Availability or a larger profile, assume that simple, small-footprint context and the smallest supported sizes / single-node counts the Simple model permits.
 - If the context does not contain the answer, say so plainly. Do not invent specifics.
 - Cite every factual claim inline with the marker shown above each snippet, e.g. [vmware-cloud-foundation-9-1 p.42].
 - Prefer concise, structured answers. Use bullet points for steps and lists.
@@ -42,6 +47,12 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     history: list[ChatMessage] = []
+
+
+class PlanRequest(BaseModel):
+    # Friendly input names from planner.INPUT_CELLS; missing keys fall back to
+    # the smallest-sensible defaults.
+    inputs: dict = {}
 
 
 def _cite_tag(source: str, page_start: int, page_end: int) -> str:
@@ -82,12 +93,26 @@ def create_app() -> FastAPI:
             count = collection_count(settings)
         except Exception:  # noqa: BLE001
             count = 0
+        # Report the model that actually answers, given the active provider.
+        active_chat_model = (
+            settings.anthropic_model
+            if settings.chat_provider == "anthropic"
+            else settings.chat_model
+        )
         return JSONResponse(
             {
-                "chat_model": settings.chat_model,
+                "chat_provider": settings.chat_provider,
+                "chat_model": active_chat_model,
                 "embed_model": settings.embed_model,
                 "lm_studio_url": settings.lm_studio_url,
                 "collection_size": count,
+                # Retrieval/synthesis knobs surfaced in the header status rail.
+                "top_k": settings.top_k,
+                "multi_query": settings.multi_query,
+                "multi_query_max": settings.multi_query_max,
+                "rerank_enabled": settings.rerank_enabled,
+                "rerank_model": settings.rerank_model if settings.rerank_enabled else None,
+                "rerank_top_n": settings.rerank_top_n,
             }
         )
 
@@ -112,9 +137,14 @@ def create_app() -> FastAPI:
                     source     = meta.get("source", "?")
                     section    = (meta.get("section") or "").strip()
                     src_meta   = SOURCE_BY_NAME.get(source)
-                    pdf_url = (
-                        f"{src_meta.url}#page={page_start}" if src_meta else None
-                    )
+                    # PDFs get a #page=N deep-link; the xlsx workbook has no
+                    # pages, so link to the asset itself.
+                    if not src_meta:
+                        pdf_url = None
+                    elif src_meta.kind == "xlsx":
+                        pdf_url = src_meta.url
+                    else:
+                        pdf_url = f"{src_meta.url}#page={page_start}"
                     hits.append({
                         "source":     source,
                         "page_start": page_start,
@@ -147,22 +177,11 @@ def create_app() -> FastAPI:
                     }
                 )
 
-                # 2) stream completion
-                client = AsyncOpenAI(base_url=settings.chat_base_url, api_key=settings.api_key)
-                stream_resp = await client.chat.completions.create(
-                    model=settings.chat_model,
-                    messages=messages,
-                    stream=True,
-                    temperature=0.2,
-                )
+                # 2) stream completion (local llama.cpp or Anthropic, per CHAT_PROVIDER)
                 answer_parts: list[str] = []
-                async for event in stream_resp:
-                    if not event.choices:
-                        continue
-                    delta = event.choices[0].delta.content
-                    if delta:
-                        answer_parts.append(delta)
-                        yield _sse("token", {"text": delta})
+                async for delta in stream_chat_async(settings, messages):
+                    answer_parts.append(delta)
+                    yield _sse("token", {"text": delta})
 
                 yield _sse("done", {"answer": "".join(answer_parts)})
             except Exception as exc:  # noqa: BLE001
@@ -177,6 +196,41 @@ def create_app() -> FastAPI:
                 "Connection": "keep-alive",
             },
         )
+
+    # ── Sizing calculator (Planner tab) ────────────────────────────────────
+    @app.on_event("startup")
+    async def _warm_planner() -> None:
+        # Kick the ~60s formula-graph compile in the background so the first
+        # user calc is ~4s, not ~60s. No-op if the workbook isn't present.
+        try:
+            from .planner import warm
+
+            warm()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @app.get("/api/plan/options")
+    async def plan_options() -> JSONResponse:
+        from .planner import is_ready, options
+
+        return JSONResponse({**options(), "ready": is_ready()})
+
+    @app.post("/api/plan")
+    async def plan(req: PlanRequest) -> JSONResponse:
+        from .planner import DEFAULTS, compute
+
+        # Start from smallest-sensible defaults; user inputs override.
+        merged = {**DEFAULTS, **(req.inputs or {})}
+        try:
+            # compute() compiles on first call (~60s) then ~4s; off the loop.
+            result = await asyncio.to_thread(compute, merged)
+        except FileNotFoundError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                {"error": f"{type(exc).__name__}: {exc}"}, status_code=500
+            )
+        return JSONResponse(result.to_dict())
 
     return app
 

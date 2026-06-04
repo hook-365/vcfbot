@@ -27,6 +27,25 @@ services:
       # to an embed model with a larger trained context.
       TARGET_TOKENS:  ${TARGET_TOKENS:-220}
       OVERLAP_TOKENS: ${OVERLAP_TOKENS:-40}
+      # Chat provider for the synthesis step. "local" (default) keeps everything
+      # on the llama.cpp server above. Set CHAT_PROVIDER=anthropic to route ONLY
+      # chat completion to Claude (embeddings stay local) — requires
+      # ANTHROPIC_API_KEY. Uses the native anthropic SDK with adaptive thinking.
+      CHAT_PROVIDER:       ${CHAT_PROVIDER:-local}
+      ANTHROPIC_API_KEY:   ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL:     ${ANTHROPIC_MODEL:-claude-opus-4-8}
+      ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-8192}
+      # Cross-encoder reranking (query-time, no re-index). Over-retrieve
+      # RERANK_TOP_N candidates by embedding, then a reranker reorders by true
+      # relevance — surfaces the authoritative chunk dense retrieval buries.
+      # Default off; set RERANK_ENABLED=true + RERANK_API_KEY (Voyage) to use.
+      RERANK_ENABLED:  ${RERANK_ENABLED:-false}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-https://api.voyageai.com/v1}
+      RERANK_API_KEY:  ${RERANK_API_KEY:-${VOYAGE_API_KEY:-}}
+      RERANK_MODEL:    ${RERANK_MODEL:-rerank-2.5-lite}
+      RERANK_TOP_N:    ${RERANK_TOP_N:-100}
+      # Atomic table chunks (pymupdf find_tables) — structured facts survive whole.
+      TABLE_CHUNKS:    ${TABLE_CHUNKS:-true}
       # Container-internal paths; data/ on the host is bind-mounted below.
       PDF_DIR:        /app/data/pdfs
       CHROMA_DIR:     /app/data/chroma

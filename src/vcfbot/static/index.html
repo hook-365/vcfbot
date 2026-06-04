@@ -63,6 +63,21 @@
         <span class="status-rail__value" id="status-chunks">—</span>
       </div>
       <div class="status-rail__sep" aria-hidden="true"></div>
+      <div class="status-rail__group" id="status-topk-group" title="retrieved context depth (final top-k)">
+        <span class="status-rail__label">top-k</span>
+        <span class="status-rail__value" id="status-topk">—</span>
+      </div>
+      <div class="status-rail__sep" aria-hidden="true"></div>
+      <div class="status-rail__group" id="status-mq-group" title="multi-query retrieval">
+        <span class="status-rail__label">multi-q</span>
+        <span class="status-rail__value" id="status-mq">—</span>
+      </div>
+      <div class="status-rail__sep" aria-hidden="true"></div>
+      <div class="status-rail__group" id="status-rerank-group" title="cross-encoder reranking">
+        <span class="status-rail__label">rerank</span>
+        <span class="status-rail__value" id="status-rerank">—</span>
+      </div>
+      <div class="status-rail__sep" aria-hidden="true"></div>
       <div class="status-rail__group status-rail__link" id="status-link" title="connection">
         <span class="status-rail__dot" aria-hidden="true"></span>
         <span class="status-rail__value" id="status-link-text">offline</span>
@@ -70,6 +85,10 @@
     </div>
 
     <div class="header-actions">
+      <div class="viewtabs" role="tablist" aria-label="View">
+        <button class="viewtab is-active" id="tab-chat" type="button" role="tab" aria-selected="true" data-view="chat">chat</button>
+        <button class="viewtab" id="tab-planner" type="button" role="tab" aria-selected="false" data-view="planner">planner</button>
+      </div>
       <button class="header-btn" id="about-btn" type="button" aria-label="About this tool" title="About">
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>
@@ -141,9 +160,9 @@
           </p>
           <ol class="starters__list">
             <li>
-              <button class="starter" type="button" data-question="What is the minimum amount of nodes for a management cluster that will also run the workloads?">
+              <button class="starter" type="button" data-question="What are the RAM, CPU and storage requirements for all components of a minimally supported simple VCF deployment?">
                 <span class="starter__index">01</span>
-                <span class="starter__text">What is the minimum amount of nodes for a management cluster that will also run the workloads?</span>
+                <span class="starter__text">What are the RAM, CPU and storage requirements for all components of a minimally supported simple VCF deployment?</span>
                 <span class="starter__arrow" aria-hidden="true">↵</span>
               </button>
             </li>
@@ -174,6 +193,27 @@
     </section>
 
     <section class="thread" id="thread" hidden></section>
+
+    <section class="planner" id="planner-view">
+      <div class="planner__inner">
+        <header class="planner__head">
+          <span class="planner__eyebrow">[ sizing calculator ]</span>
+          <h1 class="planner__title">management domain planner<span class="planner__period">.</span></h1>
+          <p class="planner__lede">
+            Drives the VCF Planning &amp; Preparation Workbook's own formulas — pick a
+            configuration and the workbook computes the appliance footprint. Starts
+            from the smallest supported layout.
+          </p>
+        </header>
+        <div class="planner__layout">
+          <form class="planner__form" id="planner-form" aria-label="Sizing inputs"></form>
+          <div class="planner__output">
+            <div class="planner__statusline" id="planner-status" hidden></div>
+            <div class="planner__results" id="planner-results"></div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer class="dock">
@@ -229,15 +269,16 @@
 
       <section class="about__section">
         <h3 class="about__h3">pipeline</h3>
-        <pre class="about__pipeline">fetch  →  extract  →  chunk  →  embed  →  retrieve  →  answer
-httpx     pymupdf     tiktoken   nomic     chroma      qwen3</pre>
+        <pre class="about__pipeline">fetch → extract → chunk → embed → retrieve → rerank → answer
+httpx    pymupdf   tiktoken  nomic    chroma+MQ  voyage*  qwen3│claude</pre>
         <ol class="about__steps">
           <li><span class="about__step-key">fetch</span><span class="about__step-val">downloads the master VCF PDF from Broadcom's CDN (one monolithic 9,158-page file)</span></li>
-          <li><span class="about__step-key">extract</span><span class="about__step-val">PyMuPDF splits each page into text and walks the document outline for hierarchical section paths</span></li>
-          <li><span class="about__step-key">chunk</span><span class="about__step-val">~800-token windows with overlap, preserving page ranges so every chunk knows where it came from</span></li>
+          <li><span class="about__step-key">extract</span><span class="about__step-val">PyMuPDF splits each page into text and walks the document outline for hierarchical section paths; tables are recovered whole as atomic chunks</span></li>
+          <li><span class="about__step-key">chunk</span><span class="about__step-val">~220-token windows with overlap (kept small because VMware's dashed acronyms tokenize heavily for the embedder), preserving page ranges so every chunk knows where it came from</span></li>
           <li><span class="about__step-key">embed</span><span class="about__step-val">nomic-embed-text-v1.5 (Q8) maps each chunk into a 768-dimensional vector with role prefixes</span></li>
-          <li><span class="about__step-key">retrieve</span><span class="about__step-val">your question is embedded the same way; the closest chunks by cosine similarity are pulled</span></li>
-          <li><span class="about__step-key">answer</span><span class="about__step-val">Qwen3 reads only the retrieved snippets, synthesizes an answer, and cites every claim</span></li>
+          <li><span class="about__step-key">retrieve</span><span class="about__step-val">your question is embedded the same way; broad questions fan out into per-component sub-queries (multi-query) so every component is represented, not just the closest neighborhood</span></li>
+          <li><span class="about__step-key">rerank</span><span class="about__step-val">optional cross-encoder (Voyage) re-reads question + candidates together and floats the most authoritative chunk to the top before synthesis</span></li>
+          <li><span class="about__step-key">answer</span><span class="about__step-val">a chat model — local Qwen3, or Claude when configured — reads only the retrieved snippets, synthesizes an answer, and cites every claim</span></li>
         </ol>
       </section>
 
@@ -248,7 +289,7 @@ httpx     pymupdf     tiktoken   nomic     chroma      qwen3</pre>
 
       <section class="about__section">
         <h3 class="about__h3">privacy</h3>
-        <p>Nothing leaves the host. The PDF, vector store, embedding model, and chat model all run locally. Questions are never sent to a third party.</p>
+        <p>The PDF, vector store, embedding model, and retrieval all run locally — your corpus is never embedded off-host. The final two steps are configurable: with a local chat model and reranking off, nothing leaves the host at all. When Claude is selected for synthesis (or Voyage for reranking), only your question and the retrieved snippets are sent to that provider — never the whole corpus. The active configuration is shown in the header status rail.</p>
       </section>
 
       <section class="about__section">

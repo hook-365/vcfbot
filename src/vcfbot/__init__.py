@@ -39,11 +39,11 @@ def fetch(force: bool) -> None:
 def index_cmd(only: str | None) -> None:
     """Extract, chunk, embed, and store all PDFs in data/pdfs/ into chromadb."""
     settings = load_settings()
-    pdfs = sorted(settings.pdf_dir.glob("*.pdf"))
+    pdfs = sorted([*settings.pdf_dir.glob("*.pdf"), *settings.pdf_dir.glob("*.xlsx")])
     if only:
         pdfs = [p for p in pdfs if p.stem == only]
     if not pdfs:
-        console.print("[yellow]no PDFs found — run `vcfbot fetch` first[/]")
+        console.print("[yellow]no sources found — run `vcfbot fetch` first[/]")
         return
     total = 0
     for pdf in pdfs:
@@ -144,13 +144,13 @@ def update(force: bool) -> None:
         # SQLite handles on the running server).
         console.print("[dim]--force: resetting chroma collection and re-embedding[/]")
         reset_collection(settings)
-        for pdf in sorted(settings.pdf_dir.glob("*.pdf")):
+        for pdf in sorted([*settings.pdf_dir.glob("*.pdf"), *settings.pdf_dir.glob("*.xlsx")]):
             console.print(f"[cyan]reindexing[/] {pdf.name} …")
             n = index_pdf(pdf, settings, on_progress=lambda m: console.print(f"  [dim]{m}[/]"))
             total_added += n
     else:
         # Diff update — only embed new chunk IDs; delete orphans.
-        for pdf in sorted(settings.pdf_dir.glob("*.pdf")):
+        for pdf in sorted([*settings.pdf_dir.glob("*.pdf"), *settings.pdf_dir.glob("*.xlsx")]):
             console.print(f"[cyan]diff-indexing[/] {pdf.name} …")
             stats = index_pdf_incremental(
                 pdf, settings, on_progress=lambda m: console.print(f"  [dim]{m}[/]")
@@ -185,3 +185,56 @@ def update(force: bool) -> None:
         f"[bold green]done.[/] +{total_added} new, -{total_removed} removed "
         f"in {duration:.1f}s. total chunks: {chunks_before} → {chunks_after}"
     )
+
+
+@main.command(name="plan")
+@click.option("--size", default=None, help="Management vCenter size: Tiny/Small/Medium/Large/XLarge.")
+@click.option("--availability", default=None, help='"High Availability" or "Standard".')
+@click.option("--host-cpu-cores", type=int, default=None, help="Physical CPU cores per host.")
+@click.option("--host-ram-gb", type=int, default=None, help="Physical RAM per host (GB).")
+@click.option("--include", multiple=True, help="Component to include (repeatable), e.g. vcf_operations.")
+@click.option("--exclude", multiple=True, help="Component to exclude (repeatable).")
+def plan_cmd(size, availability, host_cpu_cores, host_ram_gb, include, exclude) -> None:
+    """Compute VCF management-domain sizing by driving the Planning Workbook's
+    own formulas (first run compiles the model, ~60s; then ~4s per calc)."""
+    from rich.table import Table
+
+    from .planner import INPUT_CELLS, compute
+
+    inputs: dict = {}
+    if size:
+        inputs["size"] = size
+    if availability:
+        inputs["availability_model"] = availability
+    if host_cpu_cores:
+        inputs["host_cpu_cores"] = host_cpu_cores
+    if host_ram_gb:
+        inputs["host_ram_gb"] = host_ram_gb
+    for c in include:
+        inputs[c] = "Include"
+    for c in exclude:
+        inputs[c] = "Exclude"
+
+    unknown = [c for c in (*include, *exclude) if c not in INPUT_CELLS]
+    if unknown:
+        console.print(f"[yellow]unknown component(s):[/] {', '.join(unknown)}")
+        console.print(f"[dim]known: {', '.join(k for k in INPUT_CELLS if k not in ('size','availability_model','instance_model','host_cpu_cores','host_ram_gb','cpu_oversubscription','memory_oversubscription','host_ops_reserve_pct','storage_growth_pct'))}[/]")
+
+    console.print("[dim]compiling workbook formulas (first run ~60s) …[/]")
+    res = compute(inputs)
+
+    t = Table(title="VCF Management Domain Sizing (via Planning Workbook)")
+    t.add_column("Component")
+    for col in ("Nodes", "vCPU", "RAM (GB)", "Disk (GB)"):
+        t.add_column(col, justify="right")
+    for c in res.components:
+        t.add_row(c.name, f"{c.nodes:g}", f"{c.vcpu:g}", f"{c.ram_gb:g}", f"{c.disk_gb:g}")
+    t.add_section()
+    t.add_row(
+        "[bold]TOTAL[/]",
+        f"[bold]{res.total_nodes:g}[/]",
+        f"[bold]{res.total_vcpu:g}[/]",
+        f"[bold]{res.total_ram_gb:g}[/]",
+        f"[bold]{res.total_disk_gb:g}[/]",
+    )
+    console.print(t)

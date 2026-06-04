@@ -40,6 +40,11 @@ const els = {
   statusChat:  $('#status-chat'),
   statusEmbed: $('#status-embed'),
   statusChunks:$('#status-chunks'),
+  statusTopk:  $('#status-topk'),
+  statusMq:    $('#status-mq'),
+  statusRerank:$('#status-rerank'),
+  statusMqGroup:     $('#status-mq-group'),
+  statusRerankGroup: $('#status-rerank-group'),
   statusLink:  $('#status-link-text'),
   tmplUser:    $('#tmpl-user'),
   tmplAsst:    $('#tmpl-assistant'),
@@ -120,6 +125,22 @@ async function loadStatus() {
     els.statusChat.textContent   = trimModel(d.chat_model);
     els.statusEmbed.textContent  = trimModel(d.embed_model);
     els.statusChunks.textContent = formatNum(d.collection_size);
+    // Retrieval knobs
+    setStatusValue(els.statusTopk, d.top_k ?? '—', d.top_k != null);
+    setStatusValue(els.statusMq, d.multi_query ? 'on' : 'off', !!d.multi_query);
+    setStatusValue(els.statusRerank,
+      d.rerank_enabled ? trimModel(d.rerank_model) : 'off', !!d.rerank_enabled);
+    // Richer detail in tooltips (values stay compact)
+    if (els.statusMqGroup) {
+      els.statusMqGroup.title = d.multi_query
+        ? `multi-query retrieval · up to ${d.multi_query_max} sub-queries`
+        : 'multi-query retrieval (off)';
+    }
+    if (els.statusRerankGroup) {
+      els.statusRerankGroup.title = d.rerank_enabled
+        ? `cross-encoder rerank · pool ${formatNum(d.rerank_top_n)} → top-${d.top_k}`
+        : 'cross-encoder reranking (off)';
+    }
     els.statusLink.textContent   = 'online';
     els.statusRail.dataset.state = 'online';
   } catch (e) {
@@ -137,6 +158,12 @@ function trimModel(name) {
 }
 function formatNum(n) {
   return typeof n === 'number' ? n.toLocaleString('en-US') : '—';
+}
+// Set a status value and dim it when the feature is off/disabled.
+function setStatusValue(el, text, active) {
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('is-off', !active);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -657,6 +684,8 @@ function buildExportMarkdown() {
     const s = state.status;
     out.push('');
     out.push(`**chat:** \`${s.chat_model}\`  **embed:** \`${s.embed_model}\`  **chunks:** ${formatNum(s.collection_size)}`);
+    const rerank = s.rerank_enabled ? `${s.rerank_model} (pool ${formatNum(s.rerank_top_n)})` : 'off';
+    out.push(`**top-k:** ${s.top_k ?? '—'}  **multi-query:** ${s.multi_query ? `on (≤${s.multi_query_max})` : 'off'}  **rerank:** ${rerank}`);
     out.push(`**endpoint:** \`${s.lm_studio_url}\`  **origin:** ${window.location.origin}`);
   }
   out.push('');
@@ -730,3 +759,169 @@ els.input.focus();
 
 // Re-check status periodically (cheap; helps user notice if LM Studio drops)
 setInterval(loadStatus, 30_000);
+
+// ────────────────────────────────────────────────────────────────
+// View switcher (chat / planner) + Planner tab
+// ────────────────────────────────────────────────────────────────
+const planner = (() => {
+  const form    = $('#planner-form');
+  const results = $('#planner-results');
+  const statusEl = $('#planner-status');
+  let opts = null;
+  let built = false;
+
+  // Input groups: [friendly_key, label, kind]. kind drives the control.
+  const NUMS = [
+    ['host_cpu_cores',          'CPU cores per host'],
+    ['host_ram_gb',             'RAM per host (GB)'],
+  ];
+  const ADV_NUMS = [
+    ['cpu_oversubscription',    'CPU oversubscription (X:1)'],
+    ['memory_oversubscription', 'Memory oversubscription (X:1)'],
+    ['host_ops_reserve_pct',    'Host + operations reserve (%)'],
+    ['storage_growth_pct',      'Storage growth reserve (%)'],
+  ];
+
+  function selField(key, label, choices, def) {
+    const opt = choices.map(c => `<option value="${escapeAttr(c)}"${c === def ? ' selected' : ''}>${escapeAttr(c)}</option>`).join('');
+    return `<div class="pl-field"><label class="pl-field__label" for="pl-${key}">${label}</label>
+      <select id="pl-${key}" data-key="${key}">${opt}</select></div>`;
+  }
+  function numField(key, label, def) {
+    const v = def != null ? ` value="${escapeAttr(def)}"` : '';
+    return `<div class="pl-field"><label class="pl-field__label" for="pl-${key}">${label}</label>
+      <input type="number" id="pl-${key}" data-key="${key}" min="0" step="1"${v}></div>`;
+  }
+
+  function checkbox(c) {
+    const req = !!c.required;
+    return `<label class="pl-check"><input type="checkbox" data-component="${escapeAttr(c.key)}"${req ? ' checked' : ''}>` +
+      `<span>${escapeAttr(c.label)}${req ? '<em class="pl-req">required</em>' : ''}</span></label>`;
+  }
+
+  function buildForm() {
+    const d = opts.defaults || {};
+    const all = opts.components || [];
+    const required = all.filter(c => c.required).map(checkbox).join('');
+    const optional = all.filter(c => !c.required).map(checkbox).join('');
+    form.innerHTML = `
+      <div class="pl-group">
+        <div class="pl-group__title">deployment</div>
+        ${selField('size', 'Management vCenter size', opts.sizes || [], d.size)}
+        ${selField('availability_model', 'Availability', opts.availability || [], d.availability_model)}
+        ${selField('instance_model', 'Instance model', opts.instance_models || [], d.instance_model)}
+      </div>
+      <div class="pl-group">
+        <div class="pl-group__title">hosts</div>
+        ${NUMS.map(([k, l]) => numField(k, l, d[k])).join('')}
+      </div>
+      ${required ? `<div class="pl-group">
+        <div class="pl-group__title">core components</div>
+        <div class="pl-checks">${required}</div>
+      </div>` : ''}
+      <div class="pl-group">
+        <div class="pl-group__title">optional components</div>
+        <div class="pl-checks">${optional}</div>
+      </div>
+      <details class="pl-advanced">
+        <summary>advanced</summary>
+        <div class="pl-group">${ADV_NUMS.map(([k, l]) => numField(k, l, d[k])).join('')}</div>
+      </details>
+      <button class="pl-compute" type="submit">compute sizing →</button>`;
+    form.addEventListener('submit', (e) => { e.preventDefault(); compute(); });
+  }
+
+  function gather() {
+    const inputs = {};
+    form.querySelectorAll('select[data-key]').forEach(s => { inputs[s.dataset.key] = s.value; });
+    form.querySelectorAll('input[type="number"][data-key]').forEach(n => {
+      if (n.value !== '') inputs[n.dataset.key] = Number(n.value);
+    });
+    form.querySelectorAll('input[type="checkbox"][data-component]').forEach(cb => {
+      inputs[cb.dataset.component] = cb.checked ? 'Include' : 'Exclude';
+    });
+    return inputs;
+  }
+
+  function gnum(x) { return Number(x).toLocaleString('en-US'); }
+
+  function render(d) {
+    if (!d.components || !d.components.length) {
+      results.innerHTML = '<p class="pl-empty">No components in this configuration.</p>';
+      return;
+    }
+    const rows = d.components.map(c =>
+      `<tr><td>${escapeAttr(c.name)}</td><td>${gnum(c.nodes)}</td><td>${gnum(c.vcpu)}</td><td>${gnum(c.ram_gb)}</td><td>${gnum(c.disk_gb)}</td></tr>`
+    ).join('');
+    const t = d.totals || {};
+    const hasRuntime = d.components.some(c => /VCF services runtime/i.test(c.name));
+    results.innerHTML = `
+      <table class="pl-table">
+        <thead><tr><th>component</th><th>nodes</th><th>vCPU</th><th>RAM (GB)</th><th>storage (GB)</th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr><td>total</td><td>${gnum(t.nodes)}</td><td>${gnum(t.vcpu)}</td><td>${gnum(t.ram_gb)}</td><td>${gnum(t.disk_gb)}</td></tr></tfoot>
+      </table>
+      ${hasRuntime ? `<p class="pl-note pl-note--gloss"><strong>VCF services runtime</strong> (control + worker nodes) is the Kubernetes-based platform that runs VCF's management services — fleet lifecycle, SDDC Manager, software depot — introduced in VCF 9.x. It deploys with every management domain.</p>` : ''}
+      <p class="pl-note">Computed by the VCF Planning &amp; Preparation Workbook's own formulas (no hand-coded math). Figures are appliance footprint; physical host capacity, vSAN overhead and growth headroom are modeled separately in the workbook.</p>`;
+  }
+
+  async function compute() {
+    statusEl.hidden = false;
+    statusEl.dataset.state = 'busy';
+    statusEl.textContent = (opts && opts.ready === false)
+      ? 'compiling workbook formulas (first run, ~60s)…'
+      : 'computing…';
+    try {
+      const r = await fetch('/api/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs: gather() }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+      if (opts) opts.ready = true;
+      statusEl.hidden = true;
+      render(d);
+    } catch (e) {
+      statusEl.dataset.state = 'error';
+      statusEl.textContent = 'error · ' + (e && e.message || e);
+    }
+  }
+
+  async function ensure() {
+    if (built) return;
+    built = true;
+    try {
+      const r = await fetch('/api/plan/options');
+      opts = await r.json();
+    } catch (e) {
+      statusEl.hidden = false;
+      statusEl.dataset.state = 'error';
+      statusEl.textContent = 'planner unavailable · ' + (e && e.message || e);
+      return;
+    }
+    buildForm();
+    results.innerHTML = '<p class="pl-empty">Smallest supported layout shown below — adjust inputs and recompute.</p>';
+    compute(); // auto-show the default smallest config
+  }
+
+  return { ensure };
+})();
+
+(function initViewTabs() {
+  const tabs = document.querySelectorAll('.viewtab');
+  function setView(v) {
+    if (v !== 'planner' && v !== 'chat') v = 'chat';
+    document.body.dataset.view = v;
+    tabs.forEach(t => {
+      const on = t.dataset.view === v;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    try { history.replaceState(null, '', v === 'planner' ? '#planner' : '#'); } catch (_) {}
+    if (v === 'planner') planner.ensure();
+  }
+  tabs.forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
+  window.addEventListener('hashchange', () => setView(location.hash.replace('#', '')));
+  setView(location.hash.replace('#', '') || 'chat');
+})();

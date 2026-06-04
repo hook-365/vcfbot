@@ -9,11 +9,14 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.69.0",
     "chromadb>=1.5.9",
     "click>=8.4.1",
     "fastapi>=0.136.3",
+    "formulas>=1.2.7",
     "httpx>=0.28.1",
     "openai>=2.38.0",
+    "openpyxl>=3.1.5",
     "pymupdf>=1.27.2.3",
     "rich>=15.0.0",
     "tiktoken>=0.13.0",
