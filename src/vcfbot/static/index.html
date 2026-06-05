@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>vcfbot · local archive</title>
+  <title>vcfbot · VCF documentation assistant</title>
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#1a1814" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#f7f3eb" media="(prefers-color-scheme: light)">
@@ -43,7 +43,7 @@
       </div>
       <div class="brand__words">
         <span class="brand__name">vcfbot<span class="brand__period">.</span></span>
-        <span class="brand__sub">local research console · v0.1</span>
+        <span class="brand__sub">VCF documentation assistant · v0.1</span>
       </div>
     </div>
 
@@ -142,13 +142,13 @@
     <section class="empty-state" id="empty-state">
       <div class="empty-state__inner">
         <div class="empty-state__lockup">
-          <span class="empty-state__eyebrow">[ a local archive of ]</span>
+          <span class="empty-state__eyebrow">[ ask anything about ]</span>
           <h1 class="empty-state__title">
             <span class="empty-state__title-line">VMware Cloud</span>
             <span class="empty-state__title-line empty-state__title-line--accent">Foundation<span class="empty-state__period">.</span></span>
           </h1>
           <p class="empty-state__lede">
-            Ask anything about deployment, lifecycle, vSAN, networking, upgrades, or known issues. Every answer cites the page it came from — verifiable, auditable, your own.
+            Deployment, lifecycle, vSAN, networking, upgrades, known issues — answers are drawn from the VCF 9.1 documentation and cite the exact page, so you can open the source and check.
           </p>
         </div>
 
@@ -261,10 +261,10 @@
       </header>
 
       <p class="about__lede">
-        A local research console for VMware Cloud Foundation documentation.
-        Reads Broadcom's official PDF, splits it into passages, indexes them
-        into a vector space, then uses retrieval-augmented generation to
-        answer questions with page-accurate citations.
+        A documentation assistant for VMware Cloud Foundation. It reads
+        Broadcom's official PDF, splits it into passages, indexes them into a
+        vector space, then uses retrieval-augmented generation to answer
+        questions with page-accurate citations.
       </p>
 
       <section class="about__section">
@@ -288,8 +288,8 @@ httpx    pymupdf   tiktoken  nomic    chroma+MQ  voyage*  qwen3│claude</pre>
       </section>
 
       <section class="about__section">
-        <h3 class="about__h3">privacy</h3>
-        <p>The PDF, vector store, embedding model, and retrieval all run locally — your corpus is never embedded off-host. The final two steps are configurable: with a local chat model and reranking off, nothing leaves the host at all. When Claude is selected for synthesis (or Voyage for reranking), only your question and the retrieved snippets are sent to that provider — never the whole corpus. The active configuration is shown in the header status rail.</p>
+        <h3 class="about__h3">where queries go</h3>
+        <p>Indexing and retrieval run on whatever infrastructure you point it at; the source corpus is never sent anywhere. The answer step and reranking are configurable — run them locally, or route synthesis to Claude and reranking to Voyage, in which case only your question and the retrieved snippets go to that provider, never the whole corpus. The active setup is shown in the header status rail.</p>
       </section>
 
       <section class="about__section">
@@ -298,7 +298,7 @@ httpx    pymupdf   tiktoken  nomic    chroma+MQ  voyage*  qwen3│claude</pre>
       </section>
 
       <footer class="about__foot">
-        <span>built locally · no telemetry</span>
+        <span>self-hosted · no telemetry</span>
         <a class="about__repo" href="https://github.com/hook-365/vcfbot" target="_blank" rel="noopener">
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
